@@ -189,7 +189,8 @@ int chaseStep=0;
 
 void chaseRingAnimation() {
   switch (chaseRingMode) {
-    case 2:
+    case 1:
+      // This is the approach we did at the Hack & Tell
       if ( millis() >= ringtimer ){
         // change state to next animation point
         for(int i = 0; i < 8; i++) {
@@ -202,10 +203,10 @@ void chaseRingAnimation() {
       }
       break;
 
-    case 1:
+    case 2:
       if(millis() >= ringtimer) {
         for(int i = 0; i < 8; i++) {
-          digitalWrite(outPins[i], ((chaseStep + i) % 8) == 0);
+          digitalWrite(outPins[i], ((chaseStep + i) % 8) <= 1);
         }
         chaseStep++;
         ringtimer = millis()+RINGTIMER;
