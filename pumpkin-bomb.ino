@@ -18,17 +18,49 @@
 
 // Which pin on the Arduino is connected to the NeoPixels?
 // On a Trinket or Gemma we suggest changing this to 1:
-#define LED_PIN    6
+const int RING_LED_COUNT = 12;
+
+const int TOP_RING_PIN = 5;
+const int BOTTOM_RING_PIN = 6;
+const int CHASE_PINS[]={21,20,19,18,17,16,15,14};
 
 // How many NeoPixels are attached to the Arduino?
-#define LED_COUNT 12
 
-#define RINGTIMER 50;
-unsigned long ringtimer=0;
+struct AnimationState {
+  bool idle;
+  int animation;
+  // The duration of the animation
+  float duration;
+  // The start time of the animation
+  unsigned long start;
+  // The end_time of the animation (start_time + duration_ms)
+  unsigned long end;
+  // The elapsed milliseconds of the animation.
+  unsigned long elapsed_ms;
+  // Normalized completion of animation (0,1)
+  float elapsed_n;
+};
 
+// Program State Setup
+enum program_mode { IDLE, ANIMATE, SETTINGS };
+program_mode current_program_mode = IDLE;
+
+unsigned long button_hold_start_time = 0;
+
+enum animations {A_EXPLODE_1};
+int animation_count = 1;
+
+
+struct AnimationState animation_state = {true, A_EXPLODE_1, 0, 0, 0, 0, 0};
+
+unsigned long last_debug_print = 0;
+
+int ring_brightness = 10;
+
+uint32_t GREEN = Adafruit_NeoPixel::Color(0, 255,0);
+uint32_t ORANGE = Adafruit_NeoPixel::Color(255, 55,0);
 
 // Declare our NeoPixel strip object:
-Adafruit_NeoPixel strip(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
 // Argument 1 = Number of pixels in NeoPixel strip
 // Argument 2 = Arduino pin number (most are valid)
 // Argument 3 = Pixel type flags, add together as needed:
@@ -38,14 +70,24 @@ Adafruit_NeoPixel strip(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
 //   NEO_RGB     Pixels are wired for RGB bitstream (v1 FLORA pixels, not v2)
 //   NEO_RGBW    Pixels are wired for RGBW bitstream (NeoPixel RGBW products)
 
+enum ring_state {RING_OFF, RING_SOLID};
+
+struct RingState {
+  Adafruit_NeoPixel ring;
+  ring_state state;
+  unsigned long last_state_change;
+};
+
+struct RingState top = {Adafruit_NeoPixel(RING_LED_COUNT, TOP_RING_PIN, NEO_GRB + NEO_KHZ800), RING_OFF, 0};
+struct RingState bottom = {Adafruit_NeoPixel(RING_LED_COUNT, BOTTOM_RING_PIN, NEO_GRB + NEO_KHZ800), RING_OFF, 0};
+
+// Chase Ring
+unsigned long chase_step = 0;
+unsigned long  chase_timer = 0;
 
 #define BUTTON_PIN 9
 Bounce2::Button button = Bounce2::Button();
 
-int animationMode = 0;
-int topRingMode = 0;
-int bottomRingMode = 0;
-int chaseRingMode = 0;
 // LED for chase ring 13-21
 
 // setup() function -- runs once at startup --------------------------------
@@ -65,239 +107,253 @@ void setup() {
   button.interval( 5 );
   button.setPressedState( LOW ); 
 
-  strip.begin();           // INITIALIZE NeoPixel strip object (REQUIRED)
-  strip.show();            // Turn OFF all pixels ASAP
-  strip.setBrightness(50); // Set BRIGHTNESS to about 1/5 (max = 255)
+  top.ring.begin();           // INITIALIZE NeoPixel strip object (REQUIRED)
+  top.ring.show();            // Turn OFF all pixels ASAP
+  top.ring.setBrightness(ring_brightness); // Set BRIGHTNESS to about 1/5 (max = 255)
+
+  bottom.ring.begin();           // INITIALIZE NeoPixel strip object (REQUIRED)
+  bottom.ring.show();            // Turn OFF all pixels ASAP
+  bottom.ring.setBrightness(ring_brightness); 
 
   for(int i = 14; i < 22; i++) {
     pinMode(i, OUTPUT);
   }
-
-  ringtimer = millis()+RINGTIMER;
-
-  
-
 }
-
-
-// loop() function -- runs repeatedly as long as board is on ---------------
-unsigned long lastlog=0;
-
 
 void loop() {
-    // UPDATE THE BUTTON
-  // YOU MUST CALL THIS EVERY LOOP
+  unsigned long time = millis() + 100000;
   button.update();
 
+  //Serial.println(button.getPressedState());
+
   if(button.pressed()) {
-    cycleAnimation();
-    Serial.print("AnimationState: " );
-    Serial.println(animationMode);
-    Serial.println(topRingMode);
-    Serial.println(bottomRingMode);
-    Serial.println(chaseRingMode);
+    button_hold_start_time = time;
   }
 
-  topRingAnimation();
-  bottomRingAnimation();
-  chaseRingAnimation();
+  if(button.released()) {
+    int delta_hold_time = time - button_hold_start_time;
+    button_hold_start_time = 0;
 
-  // <Button>.pressed() RETURNS true IF THE STATE CHANGED
-  // AND THE CURRENT STATE MATCHES <Button>.setPressedState(<HIGH or LOW>);
-  // if ( button.pressed() ) {
-  //   strip.setPixelColor(1, strip.Color(255,   0,   0));         //  Set pixel's color (in RAM)
-  //   strip.show();                          //  Update strip to match
-  //   delay(1000); 
-  // } else {
-  //   strip.clear();
-  // }
-  // Fill along the length of the strip in various colors...
-  // colorWipe(strip.Color(255,   0,   0), 50); // Red
-  // colorWipe(strip.Color(  0, 255,   0), 50); // Green
-  // colorWipe(strip.Color(  0,   0, 255), 50); // Blue
+    switch (current_program_mode) {
+      case IDLE: {
+        if (delta_hold_time < 3000) {
+          animation_init(time, 3000 + (delta_hold_time * 2));
+        } else {
+          settings_init(time);
+        }
+      } break;
 
-  // Do a theater marquee effect in various colors...
-  // theaterChase(strip.Color(127, 127, 127), 50); // White, half brightness
-  // theaterChase(strip.Color(127,   0,   0), 50); // Red, half brightness
-  // theaterChase(strip.Color(  0,   0, 127), 50); // Blue, half brightness
+      case SETTINGS: {
+        if (delta_hold_time > 3000) {
+          idle_init(time);
+        } else {
+          ring_brightness += 10;
+          if (ring_brightness >= 200) {
+            ring_brightness = 10;
+          }
+          Serial.println("Ring Brightness: ");
+          Serial.print(ring_brightness);
+          Serial.println("");
+          top.ring.setBrightness(ring_brightness); 
+          bottom.ring.setBrightness(ring_brightness);
+          top.ring.show();
+          bottom.ring.show();
+        }
+      }  break;
+      
+      case ANIMATE: {
+      }  break;      
+    }
+  }
 
-  // rainbow(10);             // Flowing rainbow cycle along the whole strip
-  // theaterChaseRainbow(50); // Rainbow-enhanced theaterChase variant
+  animation_update(time);
+  animate(time);
+
+  if (time > last_debug_print + 1000) {
+    debug_state();
+    last_debug_print = time;
+  }
+
 }
 
-void cycleAnimation() {
-  if (++animationMode > 1 ) {
-    animationMode = 0;
-  }
+void debug_state() {
+  Serial.println("------------------");
+  Serial.println("Program Mode: ");
+  Serial.print(current_program_mode);
+  Serial.println("");
+  Serial.print("AnimationState: idle: ");
+  Serial.print(animation_state.idle);
+  Serial.print(" duration: ");
+  Serial.print(animation_state.duration);
+  Serial.print(" start: ");
+  Serial.print(animation_state.start);
+  Serial.print(" end: ");
+  Serial.print(animation_state.end);
+  Serial.print(" elapsed_n: ");
+  Serial.print(animation_state.elapsed_n);
+  Serial.print(" elapsed_ms: ");
+  Serial.print(animation_state.elapsed_ms);
+  Serial.println("");
+}
 
-  if (animationMode == 0) {
-    topRingMode = 0;
-    bottomRingMode = 0;
-    chaseRingMode = 0;
-  }
+void idle_init(unsigned long time) {
+  current_program_mode = IDLE;
+  chase_halt();
+  ring_halt(&top, time);
+  ring_halt(&top, time);                       
+}
 
-  if (animationMode == 1) {
-    topRingMode = 1;
-    bottomRingMode = 1;
-    chaseRingMode = 1;
+void settings_init(unsigned long time) {
+  current_program_mode = SETTINGS;
+  chase_halt();
+  ring_solid(&top, time, ORANGE);
+  ring_solid(&bottom, time, ORANGE);
+}
+
+void cycleAnimation(unsigned long time) {
+  animation_halt(time);
+  if(++animation_state.animation >= animation_count) {
+    animation_state.animation = 0;
   }
 }
 
-void topRingAnimation() {
-  switch (topRingMode) {
-    case 1:
-      if((millis()%200) >= 100) {
-        colorSet(strip.Color(  0, 255,   0));
+void animation_update(unsigned long time) {
+  if (!animation_state.idle) {
+    float elapsed_ms = time - animation_state.start;
+    float elapsed_n = elapsed_ms / animation_state.duration;  
+    if (elapsed_ms >= animation_state.duration) {
+      animation_state.elapsed_n = 1;
+      animation_state.elapsed_ms = animation_state.duration;
+      animation_halt(time);
+    } else {
+      animation_state.elapsed_n = elapsed_n;
+      animation_state.elapsed_ms = elapsed_ms;
+    }
+  }
+}
+
+void animation_init(unsigned long time, unsigned long duration) {
+  current_program_mode = ANIMATE;
+  animation_state.idle = false;
+  animation_state.duration = duration;
+  animation_state.start = time;
+  animation_state.end = time + duration;
+  animation_state.elapsed_n = 0;
+  animation_state.elapsed_ms = 0;
+}
+
+void animation_reset() {
+  animation_state.idle = true;
+  animation_state.duration = 0;
+  animation_state.start = 0;
+  animation_state.end = 0;
+  animation_state.elapsed_n = 0;
+  animation_state.elapsed_ms = 0;
+}
+
+void animation_halt(unsigned long time) {
+  chase_halt();
+  ring_halt(&top, time);
+  ring_halt(&bottom, time);
+  animation_reset();
+  current_program_mode = IDLE;
+}
+
+void animate(unsigned long time) {
+  switch (current_program_mode) {
+    case IDLE: {
+      int delta_hold_time = time - button_hold_start_time;
+      if (button_hold_start_time == 0) {
+        chase_halt();
+      } else if (delta_hold_time < 3000) {
+        chase_single(((time - button_hold_start_time) / 500) % 8);
       } else {
-        strip.clear();
-        strip.show();
+        ring_blink(&top, time, 1000, ORANGE);
       }
       
-      break;
-    default:
-      strip.clear();
-      strip.show();
-      break;  
-  }
-}
+    } break;
 
-void bottomRingAnimation() {
-  switch (bottomRingMode) {
-    case 1:
-      break;
-    default:
-      break;  
-  }
-}
-
-uint8_t ringleds=0;
-
-int outPins[]={21,20,19,18,17,16,15,14};
-int steps = sizeof(outPins)/sizeof(int);
-int ringPatterns[][8] = {
-  { 1,0,0,0,0,0,0,0},
-  { 0,1,0,0,0,0,0,0},
-  { 0,0,1,0,0,0,0,0},
-  { 0,0,0,1,0,0,0,0},
-  { 0,0,0,0,1,0,0,0},
-  { 0,0,0,0,0,1,0,0},
-  { 0,0,0,0,0,0,1,0},
-  { 0,0,0,0,0,0,0,1},
-};
-int ringstep=0;
-int chaseStep=0;
-
-void chaseRingAnimation() {
-  switch (chaseRingMode) {
-    case 1:
-      // This is the approach we did at the Hack & Tell
-      if ( millis() >= ringtimer ){
-        // change state to next animation point
-        for(int i = 0; i < 8; i++) {
-          digitalWrite(outPins[i], ringPatterns[ringstep][i]);
-        }
-        ringstep++;
-        if ( ringstep > 7 ) ringstep=0;
-        // change timer
-        ringtimer = millis()+RINGTIMER;
+    case SETTINGS: {
+      int delta_hold_time = time - button_hold_start_time;
+      if (button_hold_start_time == 0) {
+        // nothing for now
+      } else if (delta_hold_time > 3000) {
+         ring_blink(&top, time, 1000, ORANGE);
       }
-      break;
+    } break;
 
-    case 2:
-      if(millis() >= ringtimer) {
-        for(int i = 0; i < 8; i++) {
-          digitalWrite(outPins[i], ((chaseStep + i) % 8) <= 1);
-        }
-        chaseStep++;
-        ringtimer = millis()+RINGTIMER;
+    case ANIMATE: {
+      unsigned long blink_rate = 100 - (50 * animation_state.elapsed_n);
+      int chase_rate = 100 - (99 * (animation_state.elapsed_n * 1.2));
+      if(animation_state.elapsed_n < 1) {
+        ring_blink(&top, time, blink_rate, GREEN);
+        ring_blink(&bottom, time, blink_rate, GREEN);
+      } else {
+        ring_solid(&top, time, GREEN);
+        ring_solid(&bottom, time, GREEN);
       }
-      break;  
 
-    default:
-      for(int i = 14; i < 22; i++) {
-        digitalWrite(i, LOW);
+      if(animation_state.elapsed_n < 0.8) {
+        chase_spin(time, chase_rate);
+      } else {
+        chase_solid();
       }
-      break;  
+    } break;
   }
 }
 
-// Some functions of our own for creating animated effects -----------------
-
-// Fill strip pixels one after another with a color. Strip is NOT cleared
-// first; anything there will be covered pixel by pixel. Pass in color
-// (as a single 'packed' 32-bit value, which you can get by calling
-// strip.Color(red, green, blue) as shown in the loop() function above),
-// and a delay time (in milliseconds) between pixels.
-void colorWipe(uint32_t color, int wait) {
-  for(int i=0; i<strip.numPixels(); i++) { // For each pixel in strip...
-    strip.setPixelColor(i, color);         //  Set pixel's color (in RAM)
-    strip.show();                          //  Update strip to match
-    delay(wait);                           //  Pause for a moment
-  }
-}
-
-void colorSet(uint32_t color) {
-  for(int i=0; i<strip.numPixels(); i++) { // For each pixel in strip...
-    strip.setPixelColor(i, color);         //  Set pixel's color (in RAM)
-    strip.show();                          //  Update strip to match
-  }
-}
-
-// Theater-marquee-style chasing lights. Pass in a color (32-bit value,
-// a la strip.Color(r,g,b) as mentioned above), and a delay time (in ms)
-// between frames.
-void theaterChase(uint32_t color, int wait) {
-  for(int a=0; a<10; a++) {  // Repeat 10 times...
-    for(int b=0; b<3; b++) { //  'b' counts from 0 to 2...
-      strip.clear();         //   Set all pixels in RAM to 0 (off)
-      // 'c' counts up from 'b' to end of strip in steps of 3...
-      for(int c=b; c<strip.numPixels(); c += 3) {
-        strip.setPixelColor(c, color); // Set pixel 'c' to value 'color'
-      }
-      strip.show(); // Update strip with new contents
-      delay(wait);  // Pause for a moment
+void ring_blink(RingState* ring_state, unsigned long time, unsigned long blink_rate, uint32_t color) {
+  if (time >= (ring_state->last_state_change + blink_rate)) {
+    if(ring_state->state == RING_OFF) {
+      ring_solid(ring_state, time, color);
+    } else if (ring_state->state == RING_SOLID) {
+      ring_halt(ring_state, time);
     }
   }
 }
 
-// Rainbow cycle along whole strip. Pass delay time (in ms) between frames.
-void rainbow(int wait) {
-  // Hue of first pixel runs 5 complete loops through the color wheel.
-  // Color wheel has a range of 65536 but it's OK if we roll over, so
-  // just count from 0 to 5*65536. Adding 256 to firstPixelHue each time
-  // means we'll make 5*65536/256 = 1280 passes through this loop:
-  for(long firstPixelHue = 0; firstPixelHue < 5*65536; firstPixelHue += 256) {
-    // strip.rainbow() can take a single argument (first pixel hue) or
-    // optionally a few extras: number of rainbow repetitions (default 1),
-    // saturation and value (brightness) (both 0-255, similar to the
-    // ColorHSV() function, default 255), and a true/false flag for whether
-    // to apply gamma correction to provide 'truer' colors (default true).
-    strip.rainbow(firstPixelHue);
-    // Above line is equivalent to:
-    // strip.rainbow(firstPixelHue, 1, 255, 255, true);
-    strip.show(); // Update strip with new contents
-    delay(wait);  // Pause for a moment
+void ring_solid(RingState* ring_state, unsigned long time, uint32_t color) {
+  for(int i=0; i < ring_state->ring.numPixels(); i++) {
+    ring_state->ring.setPixelColor(i, color);
+  }
+  ring_state->ring.show();
+  ring_state->state = RING_SOLID;
+  ring_state->last_state_change = time;
+}
+
+void ring_halt(RingState* ring_state, unsigned long time) {
+  ring_state->ring.clear();
+  ring_state->ring.show();
+  ring_state->state = RING_OFF;
+  ring_state->last_state_change = time;
+}
+
+void chase_spin(unsigned long time, int speed_ms) {
+  if (time > chase_timer) {
+    chase_timer = time + speed_ms;
+    chase_step++;
+    for(int i = 0; i < 8; i++) {
+      digitalWrite(CHASE_PINS[i], ((chase_step + i) % 8) <= 1);
+    }
   }
 }
 
-// Rainbow-enhanced theater marquee. Pass delay time (in ms) between frames.
-void theaterChaseRainbow(int wait) {
-  int firstPixelHue = 0;     // First pixel starts at red (hue 0)
-  for(int a=0; a<30; a++) {  // Repeat 30 times...
-    for(int b=0; b<3; b++) { //  'b' counts from 0 to 2...
-      strip.clear();         //   Set all pixels in RAM to 0 (off)
-      // 'c' counts up from 'b' to end of strip in increments of 3...
-      for(int c=b; c<strip.numPixels(); c += 3) {
-        // hue of pixel 'c' is offset by an amount to make one full
-        // revolution of the color wheel (range 65536) along the length
-        // of the strip (strip.numPixels() steps):
-        int      hue   = firstPixelHue + c * 65536L / strip.numPixels();
-        uint32_t color = strip.gamma32(strip.ColorHSV(hue)); // hue -> RGB
-        strip.setPixelColor(c, color); // Set pixel 'c' to value 'color'
-      }
-      strip.show();                // Update strip with new contents
-      delay(wait);                 // Pause for a moment
-      firstPixelHue += 65536 / 90; // One cycle of color wheel over 90 frames
-    }
+void chase_single(int x) {
+  for(int i = 0; i < 8; i++) {
+    digitalWrite(CHASE_PINS[i], x == i);
   }
+}
+
+void chase_solid() {
+  for(int i = 0; i < 8; i++) {
+    digitalWrite(CHASE_PINS[i], HIGH);
+  }
+}
+
+void chase_halt() {
+  for(int i = 0; i < 8; i++) {
+    digitalWrite(CHASE_PINS[i], LOW);
+  }
+  chase_step = 0;
+  chase_timer = 0;
 }
