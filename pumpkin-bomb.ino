@@ -18,15 +18,17 @@
 
 // Which pin on the Arduino is connected to the NeoPixels?
 // On a Trinket or Gemma we suggest changing this to 1:
-#define LED_PIN    6
+const int RING_LED_COUNT = 12;
+
+const int TOP_RING_PIN = 5;
+const int BOTTOM_RING_PIN = 6;
+const int CHASE_PINS[]={21,20,19,18,17,16,15,14};
 
 // How many NeoPixels are attached to the Arduino?
-#define LED_COUNT 12
-
-#define RINGTIMER 50;
 
 struct AnimationState {
   bool idle;
+  int animation;
   // The duration of the animation
   float duration;
   // The start time of the animation
@@ -39,17 +41,26 @@ struct AnimationState {
   float elapsed_n;
 };
 
-// Animation Setup
-enum animation_mode { A_IDLE, A_EXPLODE_1 };
-int animation_mode_count = 2;
-int current_animation_mode = A_IDLE;
+// Program State Setup
+enum program_mode { IDLE, ANIMATE, SETTINGS };
+program_mode current_program_mode = IDLE;
 
-struct AnimationState animation_state = {true, 0, 0, 0, 0, 0};
+unsigned long button_hold_start_time = 0;
 
-unsigned long last_print = 0;
+enum animations {A_EXPLODE_1};
+int animation_count = 1;
+
+
+struct AnimationState animation_state = {true, A_EXPLODE_1, 0, 0, 0, 0, 0};
+
+unsigned long last_debug_print = 0;
+
+int ring_brightness = 10;
+
+uint32_t GREEN = Adafruit_NeoPixel::Color(0, 255,0);
+uint32_t ORANGE = Adafruit_NeoPixel::Color(255, 55,0);
 
 // Declare our NeoPixel strip object:
-Adafruit_NeoPixel top_ring = Adafruit_NeoPixel(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
 // Argument 1 = Number of pixels in NeoPixel strip
 // Argument 2 = Arduino pin number (most are valid)
 // Argument 3 = Pixel type flags, add together as needed:
@@ -59,8 +70,18 @@ Adafruit_NeoPixel top_ring = Adafruit_NeoPixel(LED_COUNT, LED_PIN, NEO_GRB + NEO
 //   NEO_RGB     Pixels are wired for RGB bitstream (v1 FLORA pixels, not v2)
 //   NEO_RGBW    Pixels are wired for RGBW bitstream (NeoPixel RGBW products)
 
+enum ring_state {RING_OFF, RING_SOLID};
+
+struct RingState {
+  Adafruit_NeoPixel ring;
+  ring_state state;
+  unsigned long last_state_change;
+};
+
+struct RingState top = {Adafruit_NeoPixel(RING_LED_COUNT, TOP_RING_PIN, NEO_GRB + NEO_KHZ800), RING_OFF, 0};
+struct RingState bottom = {Adafruit_NeoPixel(RING_LED_COUNT, BOTTOM_RING_PIN, NEO_GRB + NEO_KHZ800), RING_OFF, 0};
+
 // Chase Ring
-int out_pins[]={21,20,19,18,17,16,15,14};
 unsigned long chase_step = 0;
 unsigned long  chase_timer = 0;
 
@@ -86,9 +107,13 @@ void setup() {
   button.interval( 5 );
   button.setPressedState( LOW ); 
 
-  top_ring.begin();           // INITIALIZE NeoPixel strip object (REQUIRED)
-  top_ring.show();            // Turn OFF all pixels ASAP
-  top_ring.setBrightness(200); // Set BRIGHTNESS to about 1/5 (max = 255)
+  top.ring.begin();           // INITIALIZE NeoPixel strip object (REQUIRED)
+  top.ring.show();            // Turn OFF all pixels ASAP
+  top.ring.setBrightness(ring_brightness); // Set BRIGHTNESS to about 1/5 (max = 255)
+
+  bottom.ring.begin();           // INITIALIZE NeoPixel strip object (REQUIRED)
+  bottom.ring.show();            // Turn OFF all pixels ASAP
+  bottom.ring.setBrightness(ring_brightness); 
 
   for(int i = 14; i < 22; i++) {
     pinMode(i, OUTPUT);
@@ -96,59 +121,67 @@ void setup() {
 }
 
 void loop() {
-  unsigned long time = millis();
+  unsigned long time = millis() + 100000;
   button.update();
 
+  //Serial.println(button.getPressedState());
+
   if(button.pressed()) {
-    cycleAnimation(time);
+    button_hold_start_time = time;
+  }
+
+  if(button.released()) {
+    int delta_hold_time = time - button_hold_start_time;
+    button_hold_start_time = 0;
+
+    switch (current_program_mode) {
+      case IDLE: {
+        if (delta_hold_time < 3000) {
+          animation_init(time, 3000 + (delta_hold_time * 2));
+        } else {
+          settings_init(time);
+        }
+      } break;
+
+      case SETTINGS: {
+        if (delta_hold_time > 3000) {
+          idle_init(time);
+        } else {
+          ring_brightness += 10;
+          if (ring_brightness >= 200) {
+            ring_brightness = 10;
+          }
+          Serial.println("Ring Brightness: ");
+          Serial.print(ring_brightness);
+          Serial.println("");
+          top.ring.setBrightness(ring_brightness); 
+          bottom.ring.setBrightness(ring_brightness);
+          top.ring.show();
+          bottom.ring.show();
+        }
+      }  break;
+      
+      case ANIMATE: {
+      }  break;      
+    }
   }
 
   animation_update(time);
+  animate(time);
 
-  if (!animation_state.idle) {
-    animate(time);
-  }
-
-  if (time > (last_print + 500)) {
-    print_animation_state();
-    last_print = time;
+  if (time > last_debug_print + 1000) {
+    debug_state();
+    last_debug_print = time;
   }
 
 }
 
-void cycleAnimation(unsigned long time) {
-  Serial.println(button.pressed());
-  Serial.println(current_animation_mode);
-  animation_halt();
-  if(++current_animation_mode >= animation_mode_count) {
-    current_animation_mode = 0;
-  }
-
-  switch (current_animation_mode) {
-    case A_IDLE:
-      break;
-
-    case A_EXPLODE_1:
-      animation_init(time, 6000);
-      break;
-  }
-}
-
-bool animation_update(unsigned long time) {
-  float elapsed_ms = time - animation_state.start;
-  float elapsed_n = elapsed_ms / animation_state.duration;  
-  if (elapsed_ms >= animation_state.duration) {
-    animation_state.elapsed_n = 1;
-    animation_state.elapsed_ms = animation_state.duration;
-    animation_halt();
-  } else {
-    animation_state.elapsed_n = elapsed_n;
-    animation_state.elapsed_ms = elapsed_ms;
-  }
-}
-
-void print_animation_state() {
-  Serial.println("AnimationState: idle: ");
+void debug_state() {
+  Serial.println("------------------");
+  Serial.println("Program Mode: ");
+  Serial.print(current_program_mode);
+  Serial.println("");
+  Serial.print("AnimationState: idle: ");
   Serial.print(animation_state.idle);
   Serial.print(" duration: ");
   Serial.print(animation_state.duration);
@@ -163,7 +196,44 @@ void print_animation_state() {
   Serial.println("");
 }
 
+void idle_init(unsigned long time) {
+  current_program_mode = IDLE;
+  chase_halt();
+  ring_halt(&top, time);
+  ring_halt(&top, time);                       
+}
+
+void settings_init(unsigned long time) {
+  current_program_mode = SETTINGS;
+  chase_halt();
+  ring_solid(&top, time, ORANGE);
+  ring_solid(&bottom, time, ORANGE);
+}
+
+void cycleAnimation(unsigned long time) {
+  animation_halt(time);
+  if(++animation_state.animation >= animation_count) {
+    animation_state.animation = 0;
+  }
+}
+
+void animation_update(unsigned long time) {
+  if (!animation_state.idle) {
+    float elapsed_ms = time - animation_state.start;
+    float elapsed_n = elapsed_ms / animation_state.duration;  
+    if (elapsed_ms >= animation_state.duration) {
+      animation_state.elapsed_n = 1;
+      animation_state.elapsed_ms = animation_state.duration;
+      animation_halt(time);
+    } else {
+      animation_state.elapsed_n = elapsed_n;
+      animation_state.elapsed_ms = elapsed_ms;
+    }
+  }
+}
+
 void animation_init(unsigned long time, unsigned long duration) {
+  current_program_mode = ANIMATE;
   animation_state.idle = false;
   animation_state.duration = duration;
   animation_state.start = time;
@@ -181,59 +251,81 @@ void animation_reset() {
   animation_state.elapsed_ms = 0;
 }
 
-void animation_halt() {
+void animation_halt(unsigned long time) {
   chase_halt();
-  ring_halt(&top_ring);
+  ring_halt(&top, time);
+  ring_halt(&bottom, time);
   animation_reset();
+  current_program_mode = IDLE;
 }
 
 void animate(unsigned long time) {
-  switch (current_animation_mode) {
-    case A_IDLE:
-      break;
-
-    case A_EXPLODE_1:
-      int blink_rate = 1000 - (250.0 * (animation_state.elapsed_n * 3));
-      int chase_rate = 100 - (99 * (animation_state.elapsed_n * 1.2));
-      if(animation_state.elapsed_ms < 4900) {
-        ring_blink(&top_ring, time, blink_rate);
+  switch (current_program_mode) {
+    case IDLE: {
+      int delta_hold_time = time - button_hold_start_time;
+      if (button_hold_start_time == 0) {
+        chase_halt();
+      } else if (delta_hold_time < 3000) {
+        chase_single(((time - button_hold_start_time) / 500) % 8);
       } else {
-        ring_solid(&top_ring);
+        ring_blink(&top, time, 1000, ORANGE);
+      }
+      
+    } break;
+
+    case SETTINGS: {
+      int delta_hold_time = time - button_hold_start_time;
+      if (button_hold_start_time == 0) {
+        // nothing for now
+      } else if (delta_hold_time > 3000) {
+         ring_blink(&top, time, 1000, ORANGE);
+      }
+    } break;
+
+    case ANIMATE: {
+      unsigned long blink_rate = 100 - (50 * animation_state.elapsed_n);
+      int chase_rate = 100 - (99 * (animation_state.elapsed_n * 1.2));
+      if(animation_state.elapsed_n < 1) {
+        ring_blink(&top, time, blink_rate, GREEN);
+        ring_blink(&bottom, time, blink_rate, GREEN);
+      } else {
+        ring_solid(&top, time, GREEN);
+        ring_solid(&bottom, time, GREEN);
       }
 
-      if(animation_state.elapsed_ms < 4900) {
+      if(animation_state.elapsed_n < 0.8) {
         chase_spin(time, chase_rate);
       } else {
         chase_solid();
       }
-
-      break;
+    } break;
   }
 }
 
-void ring_blink(Adafruit_NeoPixel* ring, unsigned long time, int speed) {
-  if((time % speed) <= (speed / 2)) {
-    uint32_t color = ring->Color(0, 255,0);
-    for(int i=0; i<ring->numPixels(); i++) {
-      ring->setPixelColor(i, color);
+void ring_blink(RingState* ring_state, unsigned long time, unsigned long blink_rate, uint32_t color) {
+  if (time >= (ring_state->last_state_change + blink_rate)) {
+    if(ring_state->state == RING_OFF) {
+      ring_solid(ring_state, time, color);
+    } else if (ring_state->state == RING_SOLID) {
+      ring_halt(ring_state, time);
     }
-  } else {
-    ring->clear();
   }
-  ring->show();
 }
 
-void ring_solid(Adafruit_NeoPixel* ring) {
-  uint32_t color = ring->Color(0, 255,0);
-  for(int i=0; i < ring->numPixels(); i++) {
-    ring->setPixelColor(i, color);
+void ring_solid(RingState* ring_state, unsigned long time, uint32_t color) {
+  for(int i=0; i < ring_state->ring.numPixels(); i++) {
+    ring_state->ring.setPixelColor(i, color);
   }
-  ring->show();
+  ring_state->ring.show();
+  ring_state->state = RING_SOLID;
+  ring_state->last_state_change = time;
 }
 
-void ring_halt(Adafruit_NeoPixel* ring) {
-  ring->clear();
-  ring->show();
+void ring_halt(RingState* ring_state, unsigned long time) {
+  ring_state->ring.clear();
+  ring_state->ring.show();
+  ring_state->state = RING_OFF;
+  ring_state->last_state_change = time;
 }
 
 void chase_spin(unsigned long time, int speed_ms) {
@@ -241,20 +333,26 @@ void chase_spin(unsigned long time, int speed_ms) {
     chase_timer = time + speed_ms;
     chase_step++;
     for(int i = 0; i < 8; i++) {
-      digitalWrite(out_pins[i], ((chase_step + i) % 8) <= 1);
+      digitalWrite(CHASE_PINS[i], ((chase_step + i) % 8) <= 1);
     }
+  }
+}
+
+void chase_single(int x) {
+  for(int i = 0; i < 8; i++) {
+    digitalWrite(CHASE_PINS[i], x == i);
   }
 }
 
 void chase_solid() {
   for(int i = 0; i < 8; i++) {
-    digitalWrite(out_pins[i], HIGH);
+    digitalWrite(CHASE_PINS[i], HIGH);
   }
 }
 
 void chase_halt() {
   for(int i = 0; i < 8; i++) {
-    digitalWrite(out_pins[i], LOW);
+    digitalWrite(CHASE_PINS[i], LOW);
   }
   chase_step = 0;
   chase_timer = 0;
