@@ -22,7 +22,6 @@ const int RING_LED_COUNT = 12;
 
 const int TOP_RING_PIN = 5;
 const int BOTTOM_RING_PIN = 6;
-const int CHASE_PINS[]={21,20,19,18,17,16,15,14};
 
 // How many NeoPixels are attached to the Arduino?
 
@@ -82,8 +81,17 @@ struct RingState top = {Adafruit_NeoPixel(RING_LED_COUNT, TOP_RING_PIN, NEO_GRB 
 struct RingState bottom = {Adafruit_NeoPixel(RING_LED_COUNT, BOTTOM_RING_PIN, NEO_GRB + NEO_KHZ800), RING_OFF, 0};
 
 // Chase Ring
-unsigned long chase_step = 0;
-unsigned long  chase_timer = 0;
+enum chase_state {CHASE_OFF, CHASE_ON};
+
+struct ChaseState {
+  int led_count;
+  unsigned long chase_step;
+  unsigned long chase_timer;
+  chase_state state;
+  int pins[];
+};
+
+struct ChaseState chase = {8, 0, 0, CHASE_OFF, {21,20,19,18,17,16,15,14}};
 
 #define BUTTON_PIN 9
 Bounce2::Button button = Bounce2::Button();
@@ -115,9 +123,7 @@ void setup() {
   bottom.ring.show();            // Turn OFF all pixels ASAP
   bottom.ring.setBrightness(ring_brightness); 
 
-  for(int i = 14; i < 22; i++) {
-    pinMode(i, OUTPUT);
-  }
+  chase_init(&chase);
 }
 
 void loop() {
@@ -136,7 +142,7 @@ void loop() {
 
     switch (current_program_mode) {
       case IDLE: {
-        if (delta_hold_time < 3000) {
+        if (delta_hold_time <= 3000) {
           animation_init(time, 3000 + (delta_hold_time * 2));
         } else {
           settings_init(time);
@@ -198,14 +204,14 @@ void debug_state() {
 
 void idle_init(unsigned long time) {
   current_program_mode = IDLE;
-  chase_halt();
-  ring_halt(&top, time);
-  ring_halt(&top, time);                       
+  chase_off(&chase);
+  ring_off(&top, time);
+  ring_off(&bottom, time);                       
 }
 
 void settings_init(unsigned long time) {
   current_program_mode = SETTINGS;
-  chase_halt();
+  chase_off(&chase);
   ring_solid(&top, time, ORANGE);
   ring_solid(&bottom, time, ORANGE);
 }
@@ -252,9 +258,9 @@ void animation_reset() {
 }
 
 void animation_halt(unsigned long time) {
-  chase_halt();
-  ring_halt(&top, time);
-  ring_halt(&bottom, time);
+  chase_off(&chase);
+  ring_off(&top, time);
+  ring_off(&bottom, time);
   animation_reset();
   current_program_mode = IDLE;
 }
@@ -264,11 +270,11 @@ void animate(unsigned long time) {
     case IDLE: {
       int delta_hold_time = time - button_hold_start_time;
       if (button_hold_start_time == 0) {
-        chase_halt();
+        chase_off(&chase);
       } else if (delta_hold_time < 3000) {
-        chase_single(((time - button_hold_start_time) / 500) % 8);
+        chase_single(&chase, ((time - button_hold_start_time) / 500) % 8);
       } else {
-        ring_blink(&top, time, 1000, ORANGE);
+        ring_blink(&top, time, 200, ORANGE);
       }
       
     } break;
@@ -278,7 +284,7 @@ void animate(unsigned long time) {
       if (button_hold_start_time == 0) {
         // nothing for now
       } else if (delta_hold_time > 3000) {
-         ring_blink(&top, time, 1000, ORANGE);
+         ring_blink(&top, time, 200, ORANGE);
       }
     } break;
 
@@ -294,9 +300,9 @@ void animate(unsigned long time) {
       }
 
       if(animation_state.elapsed_n < 0.8) {
-        chase_spin(time, chase_rate);
+        chase_spin(&chase, time, chase_rate);
       } else {
-        chase_solid();
+        chase_solid(&chase);
       }
     } break;
   }
@@ -307,7 +313,7 @@ void ring_blink(RingState* ring_state, unsigned long time, unsigned long blink_r
     if(ring_state->state == RING_OFF) {
       ring_solid(ring_state, time, color);
     } else if (ring_state->state == RING_SOLID) {
-      ring_halt(ring_state, time);
+      ring_off(ring_state, time);
     }
   }
 }
@@ -321,39 +327,49 @@ void ring_solid(RingState* ring_state, unsigned long time, uint32_t color) {
   ring_state->last_state_change = time;
 }
 
-void ring_halt(RingState* ring_state, unsigned long time) {
+void ring_off(RingState* ring_state, unsigned long time) {
   ring_state->ring.clear();
   ring_state->ring.show();
   ring_state->state = RING_OFF;
   ring_state->last_state_change = time;
 }
 
-void chase_spin(unsigned long time, int speed_ms) {
-  if (time > chase_timer) {
-    chase_timer = time + speed_ms;
-    chase_step++;
+void chase_spin(ChaseState* chase, unsigned long time, int speed_ms) {
+  if (time > chase->chase_timer) {
+    chase->chase_timer = time + speed_ms;
+    chase->chase_step++;
     for(int i = 0; i < 8; i++) {
-      digitalWrite(CHASE_PINS[i], ((chase_step + i) % 8) <= 1);
+      digitalWrite(chase->pins[i], ((chase->chase_step + i) % chase->led_count) <= 1);
     }
   }
+  chase->state = CHASE_ON;
 }
 
-void chase_single(int x) {
-  for(int i = 0; i < 8; i++) {
-    digitalWrite(CHASE_PINS[i], x == i);
+void chase_init(ChaseState* chase) {
+  for(int i = 0; i < chase->led_count; i++) {
+    pinMode(chase->pins[i], OUTPUT);
   }
 }
 
-void chase_solid() {
-  for(int i = 0; i < 8; i++) {
-    digitalWrite(CHASE_PINS[i], HIGH);
+void chase_single(ChaseState* chase, int x) {
+  for(int i = 0; i < chase->led_count; i++) {
+    digitalWrite(chase->pins[i], x == i);
   }
+  chase->state = CHASE_ON;
 }
 
-void chase_halt() {
-  for(int i = 0; i < 8; i++) {
-    digitalWrite(CHASE_PINS[i], LOW);
+void chase_solid(ChaseState* chase) {
+  for(int i = 0; i < chase->led_count; i++) {
+    digitalWrite(chase->pins[i], HIGH);
   }
-  chase_step = 0;
-  chase_timer = 0;
+  chase->state = CHASE_ON;
+}
+
+void chase_off(ChaseState* chase) {
+  for(int i = 0; i < chase->led_count; i++) {
+    digitalWrite(chase->pins[i], LOW);
+  }
+  chase->chase_step = 0;
+  chase->chase_timer = 0;
+  chase->state = CHASE_OFF;
 }
